@@ -18,12 +18,12 @@
 * NAT小鸡需带PORT变量运行并确保PORT之后的1个端口可用，或运行完后更改订阅端口和reality端口
 
 ```
-bash <(curl -Ls https://github.com/eooce/xray-2go/raw/main/xray_2go.sh)
+bash <(curl -Ls https://github.com/kkkbox/xray-2go/raw/main/xray_2go.sh)
 ```
 
 带变量运行示例,修改为自己需要定义的参数
 ```
-PORT=8888 CFIP=www.visa.com.tw CFPORT=8443 bash <(curl -Ls https://github.com/eooce/xray-2go/raw/main/xray_2go.sh)
+PORT=8888 CFIP=www.visa.com.tw CFPORT=8443 bash <(curl -Ls https://github.com/kkkbox/xray-2go/raw/main/xray_2go.sh)
 ```
 
 # 免责声明
