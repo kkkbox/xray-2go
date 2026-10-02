@@ -1,35 +1,27 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Xray Lite Installer
+# Xray Lite Installer - Low Memory Edition
 # VLESS + TCP + REALITY + XTLS Vision
 #
-# 面向低配 VPS：
-#   - 最低：64 MB RAM + 1 GB Disk
-#   - 推荐：64 MB RAM + 256 MB Swap
+# 适合：
+# - Debian 11 / 12 / 13
+# - Ubuntu 20.04 / 22.04 / 24.04
+# - systemd
+# - 64 MB RAM + 1 GB Disk 的低配 VPS
 #
-# 支持：
-#   - Debian 11 / 12 / 13
-#   - Ubuntu 20.04 / 22.04 / 24.04
-#   - systemd
-#
-# 不安装：
-#   - Caddy / Nginx
-#   - Cloudflared / Argo
-#   - Docker
-#   - Web 面板
-#   - jq
-#   - Python
-#   - 订阅服务
+# 默认参数：
+# - PORT=443
+# - SNI=www.microsoft.com
+# - 自动创建 256 MB Swap（环境允许时）
 #
 # 用法：
 #   bash install.sh
 #
 # 自定义：
-#   PORT=443 SNI=www.microsoft.com bash install.sh
-#   PORT=2053 SNI=www.apple.com bash install.sh
-#   SERVER_IP=1.2.3.4 PORT=443 SNI=www.microsoft.com bash install.sh
+#   PORT=2053 SNI=www.microsoft.com bash install.sh
+#   SERVER_IP=1.2.3.4 PORT=443 SNI=www.apple.com bash install.sh
 #
-# 安装后：
+# 安装后管理：
 #   xray-lite status
 #   xray-lite links
 #   xray-lite restart
@@ -42,7 +34,7 @@ IFS=$'\n\t'
 umask 077
 
 # ------------------------------------------------------------------------------
-# 路径与默认参数
+# 路径和参数
 # ------------------------------------------------------------------------------
 
 readonly XRAY_DIR="/etc/xray"
@@ -67,7 +59,7 @@ PRIVATE_KEY=""
 PUBLIC_KEY=""
 
 # ------------------------------------------------------------------------------
-# 颜色与基础函数
+# 输出函数
 # ------------------------------------------------------------------------------
 
 RED='\033[1;31m'
@@ -107,19 +99,17 @@ warn() {
 }
 
 on_error() {
-    local exit_code="$1"
-    local line_no="$2"
+    local code="$1"
+    local line="$2"
 
     echo
-    red "脚本在第 ${line_no} 行执行失败，退出代码：${exit_code}"
-
-    echo
-    yellow "可执行以下命令排查："
+    red "脚本在第 ${line} 行执行失败，退出代码：${code}"
+    yellow "排查命令："
     echo "  free -h"
     echo "  swapon --show"
     echo "  df -h /"
-    echo "  dmesg -T | tail -n 50"
-    echo "  journalctl -u xray -n 100 --no-pager"
+    echo "  systemctl status xray --no-pager -l"
+    echo "  journalctl -xeu xray.service --no-pager | tail -n 100"
 }
 
 trap 'on_error $? $LINENO' ERR
@@ -129,13 +119,11 @@ trap 'on_error $? $LINENO' ERR
 # ------------------------------------------------------------------------------
 
 require_root() {
-    if [[ "${EUID}" -ne 0 ]]; then
-        die "请使用 root 用户运行。可执行：sudo -i"
-    fi
+    [[ "${EUID}" -eq 0 ]] || die "请使用 root 用户执行脚本。"
 }
 
 check_system() {
-    [[ -f /etc/os-release ]] || die "无法识别系统：缺少 /etc/os-release。"
+    [[ -f /etc/os-release ]] || die "无法识别系统，缺少 /etc/os-release。"
 
     # shellcheck disable=SC1091
     source /etc/os-release
@@ -144,12 +132,12 @@ check_system() {
         debian|ubuntu)
             ;;
         *)
-            die "仅支持 Debian / Ubuntu。当前系统：${PRETTY_NAME:-未知系统}"
+            die "仅支持 Debian 或 Ubuntu。当前系统：${PRETTY_NAME:-未知}"
             ;;
     esac
 
     command -v systemctl >/dev/null 2>&1 \
-        || die "未检测到 systemd，当前脚本仅支持 systemd 系统。"
+        || die "未检测到 systemd，当前脚本不适用于该系统。"
 
     command -v apt-get >/dev/null 2>&1 \
         || die "未检测到 apt-get。"
@@ -160,27 +148,23 @@ check_disk_space() {
 
     available_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
 
-    [[ -n "${available_kb}" ]] || die "无法检测根分区可用空间。"
+    [[ -n "${available_kb}" ]] || die "无法获取根分区可用空间。"
 
     if (( available_kb < 180000 )); then
-        warn "根分区可用空间少于约 180 MB。"
+        warn "根分区剩余空间不足约 180 MB。"
         warn "建议先执行：apt-get clean && rm -rf /var/lib/apt/lists/*"
-        warn "当前空间不足可能导致下载、解压或安装失败。"
     fi
 }
 
 check_port() {
     local port="$1"
 
-    [[ "${port}" =~ ^[0-9]+$ ]] || die "端口必须是纯数字：${port}"
-
-    if (( port < 1 || port > 65535 )); then
-        die "端口范围必须是 1-65535：${port}"
-    fi
+    [[ "${port}" =~ ^[0-9]+$ ]] || die "端口必须为数字：${port}"
+    (( port >= 1 && port <= 65535 )) || die "端口必须在 1-65535 之间：${port}"
 
     if command -v ss >/dev/null 2>&1; then
         if ss -lntH "sport = :${port}" 2>/dev/null | grep -q .; then
-            die "TCP 端口 ${port} 已被占用。请换端口，例如 PORT=2053 bash install.sh"
+            die "TCP 端口 ${port} 已被占用。请使用其他端口，例如：PORT=2053 bash install.sh"
         fi
     fi
 }
@@ -188,51 +172,49 @@ check_port() {
 check_sni() {
     [[ -n "${SNI}" ]] || die "SNI 不能为空。"
 
-    if [[ ! "${SNI}" =~ ^[A-Za-z0-9.-]+$ ]]; then
-        die "SNI 格式不正确：${SNI}"
-    fi
+    [[ "${SNI}" =~ ^[A-Za-z0-9.-]+$ ]] \
+        || die "SNI 格式不正确：${SNI}"
 
-    if [[ "${SNI}" == .* || "${SNI}" == *..* ]]; then
-        die "SNI 格式不正确：${SNI}"
-    fi
+    [[ "${SNI}" != .* && "${SNI}" != *..* ]] \
+        || die "SNI 格式不正确：${SNI}"
 }
 
 # ------------------------------------------------------------------------------
-# Swap：64MB VPS 的关键保障
+# Swap 管理
 # ------------------------------------------------------------------------------
 
-swap_is_enabled() {
+swap_enabled() {
     swapon --noheadings --show 2>/dev/null | grep -q .
 }
 
 create_swap_if_needed() {
-    local disk_kb
+    local available_kb
+    local required_kb
 
-    if swap_is_enabled; then
-        info "已检测到可用 Swap："
+    if swap_enabled; then
+        info "已检测到 Swap："
         swapon --show
         return 0
     fi
 
-    disk_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
+    available_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
+    required_kb=$((SWAP_SIZE_MB * 1024 + 180000))
 
-    if (( disk_kb < (SWAP_SIZE_MB * 1024 + 180000) )); then
-        warn "磁盘空间不足，无法安全创建 ${SWAP_SIZE_MB} MB Swap。"
-        warn "将继续安装，但 64 MB 内存下 apt/dpkg 仍可能被 OOM 杀死。"
+    if (( available_kb < required_kb )); then
+        warn "磁盘可用空间不足，跳过创建 ${SWAP_SIZE_MB} MB Swap。"
+        warn "64 MB 内存且无 Swap 时，apt/dpkg 可能再次出现 Killed。"
         return 0
     fi
 
-    info "未检测到 Swap，尝试创建 ${SWAP_SIZE_MB} MB Swap..."
+    info "未检测到 Swap，正在尝试创建 ${SWAP_SIZE_MB} MB Swap..."
 
-    if [[ -e "${SWAP_FILE}" ]]; then
-        warn "${SWAP_FILE} 已存在，但未启用。尝试启用。"
-    else
+    if [[ ! -e "${SWAP_FILE}" ]]; then
         if command -v fallocate >/dev/null 2>&1; then
             fallocate -l "${SWAP_SIZE_MB}M" "${SWAP_FILE}" 2>/dev/null || true
         fi
 
         if [[ ! -s "${SWAP_FILE}" ]]; then
-            info "fallocate 不可用或创建失败，使用 dd 创建 Swap 文件..."
+            info "使用 dd 创建 Swap 文件..."
             dd if=/dev/zero of="${SWAP_FILE}" bs=1M count="${SWAP_SIZE_MB}" status=progress
         fi
     fi
@@ -254,22 +236,21 @@ EOF
 
         sysctl -p /etc/sysctl.d/99-xray-lite-memory.conf >/dev/null 2>&1 || true
 
-        green "Swap 创建并启用成功："
+        green "Swap 已创建并启用："
         swapon --show
     else
         warn "无法启用 Swap。"
-        warn "该 VPS 可能是限制 Swap 的 OpenVZ / LXC 容器。"
-        warn "如后续 apt-get 再次显示 Killed，建议升级到至少 128 MB 内存或更换支持 Swap 的 KVM VPS。"
+        warn "当前 VPS 可能是限制 Swap 的 OpenVZ 或 LXC 容器。"
         rm -f "${SWAP_FILE}" 2>/dev/null || true
     fi
 }
 
 # ------------------------------------------------------------------------------
-# APT 修复与最小依赖安装
+# APT 修复和最小依赖
 # ------------------------------------------------------------------------------
 
 repair_apt() {
-    info "检查并修复可能中断的 dpkg / apt 状态..."
+    info "修复可能被中断的 APT / dpkg 状态..."
 
     export DEBIAN_FRONTEND=noninteractive
 
@@ -282,10 +263,11 @@ repair_apt() {
 
 install_dependencies() {
     local packages=()
-
-    info "更新 APT 软件包索引..."
+    local package
 
     export DEBIAN_FRONTEND=noninteractive
+
+    info "更新 APT 软件包索引..."
 
     apt-get update \
         -o Acquire::Languages=none \
@@ -297,18 +279,14 @@ install_dependencies() {
     command -v openssl >/dev/null 2>&1 || packages+=(openssl)
     command -v ss >/dev/null 2>&1 || packages+=(iproute2)
     command -v timeout >/dev/null 2>&1 || packages+=(coreutils)
-    command -v ca-certificates >/dev/null 2>&1 || packages+=(ca-certificates)
 
-    if (( ${#packages[@]} > 0 )); then
-        info "安装最小依赖：${packages[*]}"
-
-        # 单次只安装一个包，降低低内存 VPS 上 dpkg 的瞬时内存峰值。
-        local package
+    if (( ${#packages[@]} == 0 )); then
+        green "所有必要依赖已存在。"
+    else
         for package in "${packages[@]}"; do
+            info "安装依赖：${package}"
             apt-get install -y --no-install-recommends "${package}"
         done
-    else
-        green "所需依赖已存在，跳过安装。"
     fi
 
     apt-get clean
@@ -316,10 +294,10 @@ install_dependencies() {
 }
 
 # ------------------------------------------------------------------------------
-# Xray 下载与安装
+# Xray 下载和安装
 # ------------------------------------------------------------------------------
 
-get_architecture() {
+get_arch() {
     case "$(uname -m)" in
         x86_64)
             printf '64'
@@ -339,32 +317,25 @@ get_architecture() {
     esac
 }
 
-get_latest_xray_version() {
-    local version
-
-    version="$(
-        curl -fsSL \
-            --retry 3 \
-            --retry-delay 2 \
-            --connect-timeout 12 \
-            --max-time 30 \
-            "https://api.github.com/repos/XTLS/Xray-core/releases/latest" 2>/dev/null \
-        | sed -n 's/^[[:space:]]*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-        | head -n 1
-    )"
-
-    printf '%s' "${version}"
+get_latest_version() {
+    curl -fsSL \
+        --retry 3 \
+        --retry-delay 2 \
+        --connect-timeout 12 \
+        --max-time 30 \
+        "https://api.github.com/repos/XTLS/Xray-core/releases/latest" 2>/dev/null \
+    | sed -n 's/^[[:space:]]*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | head -n 1
 }
 
-backup_old_xray() {
+backup_old_files() {
+    local backup_file
+
     if [[ -d "${XRAY_DIR}" || -f "${XRAY_SERVICE}" || -f "${XRAY_BIN}" ]]; then
-        local backup_file
-
-        backup_file="${XRAY_BACKUP_DIR}/xray-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
-
-        info "检测到旧的 Xray 文件，正在备份..."
+        info "检测到旧版 Xray，正在备份..."
 
         mkdir -p "${XRAY_BACKUP_DIR}"
+        backup_file="${XRAY_BACKUP_DIR}/xray-$(date +%Y%m%d-%H%M%S).tar.gz"
 
         tar -czf "${backup_file}" \
             /etc/xray \
@@ -372,26 +343,30 @@ backup_old_xray() {
             /usr/local/bin/xray \
             2>/dev/null || true
 
-        green "旧配置备份位置：${backup_file}"
+        green "旧文件已备份：${backup_file}"
     fi
 }
 
 download_xray() {
-    local arch version tmpdir zip_file download_url
+    local arch
+    local version
+    local download_url
+    local temp_dir
+    local zip_file
 
-    arch="$(get_architecture)"
-    version="$(get_latest_xray_version)"
-    tmpdir="$(mktemp -d)"
-    zip_file="${tmpdir}/xray.zip"
+    arch="$(get_arch)"
+    version="$(get_latest_version)"
+    temp_dir="$(mktemp -d)"
+    zip_file="${temp_dir}/xray.zip"
 
-    trap 'rm -rf "${tmpdir}"' RETURN
+    trap 'rm -rf "${temp_dir}"' RETURN
 
     if [[ -n "${version}" ]]; then
         download_url="https://github.com/XTLS/Xray-core/releases/download/${version}/Xray-linux-${arch}.zip"
-        info "下载 Xray ${version}，架构：${arch}..."
+        info "下载 Xray ${version}（${arch}）..."
     else
         download_url="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${arch}.zip"
-        warn "无法从 GitHub API 获取版本号，改用 latest 下载地址。"
+        warn "无法读取最新版本号，使用 latest 下载地址。"
     fi
 
     curl -fL \
@@ -402,23 +377,25 @@ download_xray() {
         -o "${zip_file}" \
         "${download_url}"
 
-    unzip -oq "${zip_file}" -d "${tmpdir}/xray"
+    unzip -oq "${zip_file}" -d "${temp_dir}/xray"
 
-    [[ -f "${tmpdir}/xray/xray" ]] || die "下载文件中未找到 xray 可执行文件。"
+    [[ -f "${temp_dir}/xray/xray" ]] \
+        || die "Xray 下载包内没有找到 xray 二进制文件。"
 
     install -d -m 700 "${XRAY_DIR}"
-    install -m 0755 "${tmpdir}/xray/xray" "${XRAY_BIN}"
+    install -m 0755 "${temp_dir}/xray/xray" "${XRAY_BIN}"
 
-    rm -rf "${tmpdir}"
+    rm -rf "${temp_dir}"
     trap - RETURN
 
-    "${XRAY_BIN}" version >/dev/null 2>&1 || die "Xray 可执行文件运行失败。"
+    "${XRAY_BIN}" version >/dev/null 2>&1 \
+        || die "Xray 二进制文件无法执行。"
 
     green "Xray 安装成功：$("${XRAY_BIN}" version | head -n 1)"
 }
 
 # ------------------------------------------------------------------------------
-# Reality 配置生成
+# Reality 配置
 # ------------------------------------------------------------------------------
 
 generate_values() {
@@ -429,21 +406,21 @@ generate_values() {
         || die "UUID 格式不正确：${UUID}"
 
     [[ "${SHORT_ID}" =~ ^[a-fA-F0-9]{1,16}$ ]] \
-        || die "SHORT_ID 必须是 1-16 位十六进制字符。"
+        || die "SHORT_ID 必须为 1-16 位十六进制字符。"
 }
 
-generate_reality_keys() {
-    local key_output
+generate_keys() {
+    local result
 
     info "生成 Reality 密钥对..."
 
-    key_output="$("${XRAY_BIN}" x25519)"
+    result="$("${XRAY_BIN}" x25519)"
 
-    PRIVATE_KEY="$(awk '/PrivateKey:/ {print $2}' <<< "${key_output}")"
-    PUBLIC_KEY="$(awk '/Password/ {print $NF}' <<< "${key_output}")"
+    PRIVATE_KEY="$(awk '/PrivateKey:/ {print $2}' <<< "${result}")"
+    PUBLIC_KEY="$(awk '/Password/ {print $NF}' <<< "${result}")"
 
-    [[ -n "${PRIVATE_KEY}" ]] || die "Reality 私钥生成失败。"
-    [[ -n "${PUBLIC_KEY}" ]] || die "Reality 公钥生成失败。"
+    [[ -n "${PRIVATE_KEY}" ]] || die "无法生成 Reality 私钥。"
+    [[ -n "${PUBLIC_KEY}" ]] || die "无法生成 Reality 公钥。"
 }
 
 check_reality_target() {
@@ -455,12 +432,11 @@ check_reality_target() {
         -brief </dev/null >/dev/null 2>&1; then
         green "伪装目标 TLS 检测通过。"
     else
-        warn "无法从当前 VPS 验证 ${SNI}:443。"
-        warn "脚本会继续安装；但该目标站点不可访问或 TLS 不兼容时，Reality 可能无法正常工作。"
+        warn "无法检测 ${SNI}:443 的 TLS。脚本会继续，但该目标不可达时 Reality 可能不可用。"
     fi
 }
 
-write_xray_config() {
+write_config() {
     info "写入 Xray VLESS + Reality 配置..."
 
     install -d -m 700 "${XRAY_DIR}"
@@ -531,7 +507,7 @@ EOF
     chmod 600 "${XRAY_CONFIG}"
 
     cat > "${XRAY_ENV}" <<EOF
-# 此文件包含敏感信息，请勿公开或上传到 GitHub
+# 请勿公开此文件，也不要上传到 GitHub
 UUID=${UUID}
 PORT=${PORT}
 SNI=${SNI}
@@ -544,11 +520,11 @@ EOF
 }
 
 # ------------------------------------------------------------------------------
-# systemd、安全与日志配置
+# systemd：不使用沙箱，优先保证低配容器兼容性
 # ------------------------------------------------------------------------------
 
 write_systemd_service() {
-    info "写入 Xray systemd 服务..."
+    info "写入兼容型 Xray systemd 服务..."
 
     cat > "${XRAY_SERVICE}" <<EOF
 [Unit]
@@ -570,13 +546,6 @@ ExecStart=${XRAY_BIN} run -config ${XRAY_CONFIG}
 Restart=always
 RestartSec=5
 TimeoutStopSec=15
-
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectHome=true
-ProtectSystem=full
-ReadWritePaths=${XRAY_DIR}
-LockPersonality=true
 LimitNOFILE=65535
 
 [Install]
@@ -586,8 +555,8 @@ EOF
     chmod 644 "${XRAY_SERVICE}"
 }
 
-configure_journald() {
-    info "设置日志占用限制..."
+configure_journal() {
+    info "设置 journal 日志大小限制..."
 
     install -d -m 755 /etc/systemd/journald.conf.d
 
@@ -605,7 +574,7 @@ EOF
 }
 
 # ------------------------------------------------------------------------------
-# 节点链接与管理命令
+# 节点链接和管理命令
 # ------------------------------------------------------------------------------
 
 get_server_ip() {
@@ -617,28 +586,29 @@ get_server_ip() {
     fi
 
     ip="$(curl -4fsS --connect-timeout 5 --max-time 8 https://api.ipify.org 2>/dev/null || true)"
-    if [[ -n "${ip}" ]]; then
+    [[ -n "${ip}" ]] && {
         printf '%s' "${ip}"
         return 0
-    fi
+    }
 
     ip="$(curl -4fsS --connect-timeout 5 --max-time 8 https://ipv4.icanhazip.com 2>/dev/null | tr -d '\r\n' || true)"
-    if [[ -n "${ip}" ]]; then
+    [[ -n "${ip}" ]] && {
         printf '%s' "${ip}"
         return 0
-    fi
+    }
 
     ip="$(curl -6fsS --connect-timeout 5 --max-time 8 https://api64.ipify.org 2>/dev/null || true)"
-    if [[ -n "${ip}" ]]; then
+    [[ -n "${ip}" ]] && {
         printf '[%s]' "${ip}"
         return 0
-    fi
+    }
 
     printf 'YOUR_SERVER_IP'
 }
 
-write_client_link() {
-    local ip node_name
+write_link() {
+    local ip
+    local node_name
 
     ip="$(get_server_ip)"
     node_name="VLESS-Reality-${ip//[:\[\]]/_}"
@@ -677,7 +647,7 @@ yellow() {
 
 need_root() {
     [[ "${EUID}" -eq 0 ]] || {
-        red "请使用 root 运行。"
+        red "请使用 root 用户运行。"
         exit 1
     }
 }
@@ -686,31 +656,31 @@ usage() {
     cat <<USAGE
 Xray Lite 管理命令：
 
-  xray-lite status       查看 Xray 状态
-  xray-lite start        启动 Xray
-  xray-lite stop         停止 Xray
-  xray-lite restart      测试配置后重启 Xray
+  xray-lite status       查看服务状态
+  xray-lite start        启动服务
+  xray-lite stop         停止服务
+  xray-lite restart      测试配置后重启服务
   xray-lite logs [数量]  查看日志，默认 100 行
   xray-lite follow       实时查看日志
   xray-lite links        查看 VLESS 导入链接
   xray-lite info         查看 Reality 参数
-  xray-lite test         测试配置文件
-  xray-lite port         查看 Xray 监听端口
-  xray-lite uninstall    卸载 Xray Lite
+  xray-lite test         校验 Xray 配置
+  xray-lite port         查看监听端口
+  xray-lite uninstall    停止并卸载 Xray
 USAGE
 }
 
 uninstall_xray() {
     need_root
 
-    yellow "即将停止并卸载 Xray Lite。"
-    read -r -p "确认卸载？配置会先备份到 /root/xray-backup/ (y/N): " answer
+    yellow "即将卸载 Xray Lite。"
+    read -r -p "确认继续吗？旧配置会备份到 /root/xray-backup/ (y/N): " answer
 
     case "${answer}" in
         y|Y|yes|YES)
             ;;
         *)
-            yellow "已取消卸载。"
+            yellow "已取消。"
             exit 0
             ;;
     esac
@@ -729,12 +699,11 @@ uninstall_xray() {
     rm -rf "${XRAY_DIR}"
     rm -f "${XRAY_MANAGER}"
     rm -f /etc/systemd/journald.conf.d/20-xray-lite.conf
-    rm -f /etc/sysctl.d/99-xray-lite-memory.conf
 
     systemctl daemon-reload
     systemctl restart systemd-journald 2>/dev/null || true
 
-    green "Xray Lite 已卸载。旧配置备份位于：/root/xray-backup/"
+    green "卸载完成。备份目录：/root/xray-backup/"
 }
 
 case "${1:-help}" in
@@ -762,17 +731,9 @@ case "${1:-help}" in
         journalctl -u xray -f
         ;;
     links)
-        [[ -f "${XRAY_LINK}" ]] || {
-            red "未找到节点链接文件：${XRAY_LINK}"
-            exit 1
-        }
         cat "${XRAY_LINK}"
         ;;
     info)
-        [[ -f "${XRAY_ENV}" ]] || {
-            red "未找到参数文件：${XRAY_ENV}"
-            exit 1
-        }
         cat "${XRAY_ENV}"
         ;;
     test)
@@ -799,26 +760,27 @@ EOF
 }
 
 # ------------------------------------------------------------------------------
-# 启动和结果显示
+# 服务启动
 # ------------------------------------------------------------------------------
 
-test_and_start_xray() {
+test_and_start() {
     info "验证 Xray 配置..."
 
     "${XRAY_BIN}" run -test -config "${XRAY_CONFIG}" \
-        || die "Xray 配置校验失败。"
+        || die "Xray 配置验证失败。"
 
     systemctl daemon-reload
+    systemctl reset-failed xray 2>/dev/null || true
     systemctl enable xray >/dev/null
     systemctl restart xray
 
     sleep 2
 
     if systemctl is-active --quiet xray; then
-        green "Xray 已启动，并已设置开机自动启动。"
+        green "Xray 已启动，并已启用开机自启。"
     else
-        red "Xray 启动失败，最近日志如下："
-        journalctl -u xray -n 100 --no-pager || true
+        red "Xray 服务启动失败。"
+        journalctl -xeu xray.service --no-pager | tail -n 100 || true
         exit 1
     fi
 }
@@ -830,33 +792,28 @@ show_result() {
 
     echo
     green "================================================================"
-    green "          Xray VLESS + TCP + Reality + Vision 安装完成"
+    green "      Xray VLESS + TCP + Reality + XTLS Vision 已安装完成"
     green "================================================================"
     echo
 
-    blue "服务端信息："
+    blue "服务端参数："
     echo "  服务器地址 : ${ip}"
-    echo "  服务器端口 : ${PORT}"
+    echo "  服务端口   : ${PORT}"
     echo "  UUID       : ${UUID}"
     echo "  Reality SNI: ${SNI}"
     echo "  Public Key : ${PUBLIC_KEY}"
     echo "  Short ID   : ${SHORT_ID}"
 
     echo
-    yellow "VLESS 客户端导入链接："
+    yellow "VLESS 节点链接："
     cat "${XRAY_LINK}"
 
     echo
-    yellow "请务必在 VPS 服务商安全组 / 防火墙中放行：TCP ${PORT}"
-    yellow "本脚本不会修改 iptables、nftables、UFW、SSH 或云防火墙。"
+    yellow "必须在云服务商安全组 / 防火墙放行 TCP ${PORT}。"
+    yellow "脚本没有修改 iptables、nftables、UFW、SSH 或云防火墙。"
 
     echo
-    blue "资源状态："
-    free -h || true
-    df -h / || true
-
-    echo
-    blue "常用管理命令："
+    blue "常用命令："
     echo "  查看状态   : xray-lite status"
     echo "  查看链接   : xray-lite links"
     echo "  查看参数   : xray-lite info"
@@ -867,18 +824,23 @@ show_result() {
     echo "  卸载服务   : xray-lite uninstall"
 
     echo
-    blue "关键文件位置："
+    blue "关键文件："
     echo "  Xray 程序  : ${XRAY_BIN}"
-    echo "  服务端配置 : ${XRAY_CONFIG}"
+    echo "  Xray 配置  : ${XRAY_CONFIG}"
     echo "  节点链接   : ${XRAY_LINK}"
-    echo "  参数文件   : ${XRAY_ENV}"
+    echo "  Reality 参数: ${XRAY_ENV}"
+
+    echo
+    blue "当前资源："
+    free -h || true
+    df -h / || true
 
     echo
     green "================================================================"
 }
 
 # ------------------------------------------------------------------------------
-# 主流程
+# 主程序
 # ------------------------------------------------------------------------------
 
 main() {
@@ -886,33 +848,33 @@ main() {
     check_system
     check_disk_space
 
-    # 先创建 Swap，避免后续 apt/dpkg 进程在 64MB 内存下 OOM。
+    # 先创建 Swap，降低 apt/dpkg 在 64MB 环境被 OOM 杀掉的概率。
     create_swap_if_needed
 
-    # 修复上一次因 OOM 被中断的 apt/dpkg 状态。
+    # 修复之前可能被强杀中断的 apt/dpkg 事务。
     repair_apt
 
-    # 安装最少的必要依赖，不安装 jq。
+    # 只安装绝对必要的依赖，不使用 jq。
     install_dependencies
 
-    # 安装 iproute2 后再二次检查端口。
+    # iproute2 安装后，再进行端口检查。
     check_port "${PORT}"
     check_sni
 
-    backup_old_xray
+    backup_old_files
     download_xray
 
     generate_values
-    generate_reality_keys
+    generate_keys
     check_reality_target
 
-    write_xray_config
+    write_config
     write_systemd_service
-    configure_journald
-    write_client_link
+    configure_journal
+    write_link
     write_manager
 
-    test_and_start_xray
+    test_and_start
     show_result
 }
 
